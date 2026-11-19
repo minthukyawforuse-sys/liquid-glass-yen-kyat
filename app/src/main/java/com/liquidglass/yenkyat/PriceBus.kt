@@ -1,225 +1,262 @@
 package com.liquidglass.yenkyat
 
-import android.accessibilityservice.AccessibilityService
+import android.animation.ValueAnimator
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Intent
-import android.graphics.Bitmap
+import android.content.pm.ServiceInfo
+import android.graphics.PixelFormat
 import android.os.Build
-import android.view.Display
-import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+import android.os.IBinder
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
+import androidx.compose.ui.platform.ComposeView
+import androidx.core.app.NotificationCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
-class PriceAccessibilityService : AccessibilityService() {
+class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
 
-    private var lastPassiveScanMs = 0L
-    private val textRecognizer by lazy {
-        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-    }
+    private lateinit var windowManager: WindowManager
+    private lateinit var layoutParams: WindowManager.LayoutParams
+    private var overlayView: ComposeView? = null
+    private var edgeAnimator: ValueAnimator? = null
 
-    private val prefixRegex = Regex(
-        """(?:[¥￥Ұ]|JPY|CNY|RMB)\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+(?:\.[0-9]{1,2})?)""",
-        RegexOption.IGNORE_CASE
-    )
-    private val suffixRegex = Regex(
-        """([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+(?:\.[0-9]{1,2})?)\s*(?:円|元|yen|jpy|cny|rmb)""",
-        RegexOption.IGNORE_CASE
-    )
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    private val store = ViewModelStore()
+    private val savedStateRegistryController = SavedStateRegistryController.create(this)
 
-    override fun onServiceConnected() {
-        super.onServiceConnected()
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
+    override val viewModelStore: ViewModelStore get() = store
+    override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
+
+    private var dragStartRawX = 0f
+    private var dragStartRawY = 0f
+    private var windowStartX = 0
+    private var windowStartY = 0
+    private var isDragging = false
+    private var dockedRight = true
+
+    private val screenWidth get() = resources.displayMetrics.widthPixels
+    private val screenHeight get() = resources.displayMetrics.heightPixels
+    private val ballSizePx get() = (52 * resources.displayMetrics.density).roundToInt()
+    private val pillWidthPx get() = (242 * resources.displayMetrics.density).roundToInt()
+
+    override fun onCreate() {
+        super.onCreate()
         PriceBus.init(applicationContext)
-        PriceBus.setAccessibilityConnected(true)
-        PriceBus.onRequestScan = { performFullScan() }
+        savedStateRegistryController.performAttach()
+        savedStateRegistryController.performRestore(null)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+
+        startForegroundNotification()
+        setupFloatingWindow()
+
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        PriceBus.setOverlayRunning(true)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        val pkg = event.packageName?.toString()
-        if (pkg == packageName || pkg == "com.android.systemui") return
+    private fun startForegroundNotification() {
+        val channelId = "liquid_glass_overlay_channel"
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(channelId, "Liquid Glass Quick Ball", NotificationManager.IMPORTANCE_LOW)
+        )
+        val openIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification: Notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Liquid ¥→Ks Quick Ball ဖွင့်ထားသည်")
+            .setContentText("Quick Ball ကိုနှိပ်ပြီး Screen ပေါ်က ¥ ဈေးနှုန်း ဖတ်နိုင်ပါသည်")
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setContentIntent(openIntent)
+            .setOngoing(true)
+            .build()
 
-        val now = System.currentTimeMillis()
-        if (now - lastPassiveScanMs < 450L) return
-        lastPassiveScanMs = now
-
-        val found = scanAccessibilityWindows()
-        if (found.isNotEmpty()) {
-            PriceBus.updateDetectedPrices(found.take(6))
-        }
-    }
-
-    private fun performFullScan() {
-        PriceBus.setScanning(true, "ဈေးနှုန်း ဖတ်နေသည်...")
-
-        val foundFromNodes = scanAccessibilityWindows()
-        if (foundFromNodes.isNotEmpty()) {
-            PriceBus.updateDetectedPrices(foundFromNodes.take(6))
-            return
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            runScreenOcrFallback()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(1001, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
-            PriceBus.setScanning(false, "¥ ဈေးနှုန်း မတွေ့ပါ")
+            startForeground(1001, notification)
         }
     }
 
-    private fun runScreenOcrFallback() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        runCatching {
-            takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                mainExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(screenshot: ScreenshotResult) {
-                        var softBitmap: Bitmap? = null
-                        try {
-                            val hwBitmap = Bitmap.wrapHardwareBuffer(
-                                screenshot.hardwareBuffer,
-                                screenshot.colorSpace
-                            )
-                            softBitmap = hwBitmap?.copy(Bitmap.Config.ARGB_8888, false)
-                            hwBitmap?.recycle()
-                        } finally {
-                            screenshot.hardwareBuffer.close()
-                        }
+    private fun setupFloatingWindow() {
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-                        if (softBitmap == null) {
-                            PriceBus.setScanning(false, "Screen ဖတ်၍မရပါ")
-                            return
-                        }
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
 
-                        val bitmapToClean = softBitmap
-                        val image = InputImage.fromBitmap(bitmapToClean, 0)
-                        textRecognizer.process(image)
-                            .addOnSuccessListener { visionText ->
-                                val tokens = mutableListOf<String>()
-                                visionText.textBlocks.forEach { block ->
-                                    block.lines.forEach { line ->
-                                        val cleaned = line.text.trim()
-                                        if (cleaned.isNotEmpty()) tokens.add(cleaned)
-                                    }
-                                }
-                                val found = LinkedHashSet<Double>()
-                                extractPricesFromTokens(tokens, found)
-                                if (found.isEmpty() && visionText.text.isNotBlank()) {
-                                    findMatches(visionText.text.replace("\n", " "), found)
-                                }
-                                if (found.isNotEmpty()) {
-                                    PriceBus.updateDetectedPrices(found.take(6))
-                                } else {
-                                    PriceBus.setScanning(false, "¥ ဈေးနှုန်း မတွေ့ပါ")
-                                }
-                            }
-                            .addOnFailureListener {
-                                PriceBus.setScanning(false, "OCR ဖတ်၍မရပါ")
-                            }
-                            .addOnCompleteListener {
-                                bitmapToClean.recycle()
-                            }
-                    }
+        layoutParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            flags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (screenWidth - ballSizePx - 8).coerceAtLeast(8)
+            y = (screenHeight * 0.36f).roundToInt()
+        }
 
-                    override fun onFailure(errorCode: Int) {
-                        PriceBus.setScanning(false, "¥ ဈေးနှုန်း မတွေ့ပါ")
-                    }
+        val composeView = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@LiquidGlassOverlayService)
+            setViewTreeViewModelStoreOwner(this@LiquidGlassOverlayService)
+            setViewTreeSavedStateRegistryOwner(this@LiquidGlassOverlayService)
+            setContent {
+                LiquidGlassQuickBallRoot(
+                    onBallTouch = ::handleBallTouch,
+                    onPillDragTouch = ::handlePillDragTouch,
+                    onExpandedChanged = ::handleExpandedChanged,
+                    onFocusableChange = ::setOverlayFocusable,
+                    onCloseOverlay = { stopSelf() }
+                )
+            }
+        }
+
+        overlayView = composeView
+        windowManager.addView(composeView, layoutParams)
+    }
+
+    private fun handleBallTouch(event: MotionEvent, onTap: () -> Unit): Boolean {
+        val view = overlayView ?: return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                edgeAnimator?.cancel()
+                dragStartRawX = event.rawX
+                dragStartRawY = event.rawY
+                windowStartX = layoutParams.x
+                windowStartY = layoutParams.y
+                isDragging = false
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - dragStartRawX
+                val dy = event.rawY - dragStartRawY
+                if (!isDragging && (abs(dx) > 16f || abs(dy) > 16f)) {
+                    isDragging = true
                 }
-            )
-        }.onFailure {
-            PriceBus.setScanning(false, "¥ ဈေးနှုန်း မတွေ့ပါ")
-        }
-    }
-
-    private fun scanAccessibilityWindows(): List<Double> {
-        val roots = mutableListOf<AccessibilityNodeInfo>()
-        runCatching { windows }.getOrNull()?.forEach { win ->
-            if (win.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
-                val root = win.root ?: return@forEach
-                val pkg = root.packageName?.toString().orEmpty()
-                if (pkg.isNotBlank() && pkg != packageName && pkg != "com.android.systemui") {
-                    roots.add(root)
+                if (isDragging) {
+                    layoutParams.x = (windowStartX + dx.roundToInt()).coerceIn(0, (screenWidth - ballSizePx).coerceAtLeast(0))
+                    layoutParams.y = (windowStartY + dy.roundToInt()).coerceIn(70, (screenHeight - ballSizePx - 80).coerceAtLeast(70))
+                    runCatching { windowManager.updateViewLayout(view, layoutParams) }
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (isDragging) {
+                    dockedRight = (layoutParams.x + ballSizePx / 2) >= (screenWidth / 2)
+                    snapBallToEdge()
                 } else {
-                    root.recycle()
+                    onTap()
                 }
+                isDragging = false
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                isDragging = false
+                return true
             }
         }
-        if (roots.isEmpty()) {
-            rootInActiveWindow?.let { root ->
-                val pkg = root.packageName?.toString().orEmpty()
-                if (pkg != packageName && pkg != "com.android.systemui") roots.add(root)
-                else root.recycle()
-            }
-        }
-
-        val results = LinkedHashSet<Double>()
-        try {
-            roots.forEach { root ->
-                val tokens = ArrayList<String>(128)
-                collectTokens(root, tokens, 0)
-                extractPricesFromTokens(tokens, results)
-            }
-        } finally {
-            roots.forEach { runCatching { it.recycle() } }
-        }
-        return results.toList()
+        return false
     }
 
-    private fun collectTokens(node: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int) {
-        if (node == null || depth > 30 || out.size >= 360) return
-        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out.add(it) }
-        node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out.add(it) }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            try { collectTokens(child, out, depth + 1) } finally { runCatching { child.recycle() } }
+    private fun handlePillDragTouch(event: MotionEvent): Boolean {
+        val view = overlayView ?: return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                edgeAnimator?.cancel()
+                dragStartRawX = event.rawX
+                dragStartRawY = event.rawY
+                windowStartX = layoutParams.x
+                windowStartY = layoutParams.y
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = (event.rawX - dragStartRawX).roundToInt()
+                val dy = (event.rawY - dragStartRawY).roundToInt()
+                layoutParams.x = (windowStartX + dx).coerceIn(8, (screenWidth - pillWidthPx - 8).coerceAtLeast(8))
+                layoutParams.y = (windowStartY + dy).coerceIn(70, (screenHeight - 240).coerceAtLeast(70))
+                dockedRight = (layoutParams.x + pillWidthPx / 2) >= (screenWidth / 2)
+                runCatching { windowManager.updateViewLayout(view, layoutParams) }
+                return true
+            }
         }
+        return false
     }
 
-    private fun extractPricesFromTokens(tokens: List<String>, results: MutableSet<Double>) {
-        tokens.forEach { findMatches(it, results) }
-        var i = 0
-        while (i < tokens.size && results.size < 8) {
-            val t0 = tokens[i]
-            val t1 = tokens.getOrNull(i + 1)
-            val t2 = tokens.getOrNull(i + 2)
-            if (t1 != null && t2 != null && t0.length <= 8 && t1.length <= 12 && t2.length <= 6) {
-                val before = results.size
-                findMatches(t0 + t1 + t2, results)
-                if (results.size > before) { i += 3; continue }
-            }
-            if (t1 != null && t0.length <= 10 && t1.length <= 12) {
-                val before = results.size
-                findMatches(t0 + t1, results)
-                if (results.size > before) { i += 2; continue }
-            }
-            i++
+    private fun handleExpandedChanged(expanded: Boolean) {
+        if (expanded) {
+            val maxX = (screenWidth - pillWidthPx - 12).coerceAtLeast(8)
+            val targetX = if (dockedRight) maxX else 12
+            animateWindowX(targetX)
+        } else {
+            setOverlayFocusable(false)
+            snapBallToEdge()
         }
     }
 
-    private fun findMatches(raw: String, results: MutableSet<Double>) {
-        val text = raw.replace(Regex("""\s*\.\s*"""), ".")
-        prefixRegex.findAll(text).forEach { m ->
-            m.groupValues.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
-                ?.takeIf { it > 0.0 && it <= 99_999_999.0 }?.let { results.add(it) }
-        }
-        suffixRegex.findAll(text).forEach { m ->
-            m.groupValues.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
-                ?.takeIf { it > 0.0 && it <= 99_999_999.0 }?.let { results.add(it) }
+    private fun snapBallToEdge() {
+        val targetX = if (dockedRight) (screenWidth - ballSizePx - 6).coerceAtLeast(6) else 6
+        animateWindowX(targetX)
+    }
+
+    private fun animateWindowX(targetX: Int) {
+        val view = overlayView ?: return
+        edgeAnimator?.cancel()
+        val startX = layoutParams.x
+        if (startX == targetX) return
+        edgeAnimator = ValueAnimator.ofInt(startX, targetX).apply {
+            duration = 240L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                layoutParams.x = anim.animatedValue as Int
+                runCatching { windowManager.updateViewLayout(view, layoutParams) }
+            }
+            start()
         }
     }
 
-    override fun onUnbind(intent: Intent?): Boolean {
-        PriceBus.setAccessibilityConnected(false)
-        PriceBus.onRequestScan = null
-        return super.onUnbind(intent)
+    private fun setOverlayFocusable(focusable: Boolean) {
+        val view = overlayView ?: return
+        layoutParams.flags = if (focusable) {
+            (layoutParams.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()) or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        } else {
+            layoutParams.flags or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        }
+        runCatching { windowManager.updateViewLayout(view, layoutParams) }
     }
 
     override fun onDestroy() {
-        PriceBus.setAccessibilityConnected(false)
-        PriceBus.onRequestScan = null
-        runCatching { textRecognizer.close() }
         super.onDestroy()
+        edgeAnimator?.cancel()
+        PriceBus.setOverlayRunning(false)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        overlayView?.let { runCatching { windowManager.removeView(it) } }
+        overlayView = null
+        store.clear()
     }
 
-    override fun onInterrupt() {}
+    override fun onBind(intent: Intent?): IBinder? = null
 }
