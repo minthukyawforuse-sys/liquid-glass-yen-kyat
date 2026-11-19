@@ -12,8 +12,8 @@ android {
         applicationId = "com.liquidglass.yenkyat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     buildTypes {
@@ -54,4 +54,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.animation:animation")
+
+    // Offline ML Kit OCR (Taobao / 1688 / Amazon / ဓာတ်ပုံပေါ်က ¥ ဈေးနှုန်းများပါ ဖတ်နိုင်ရန်)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }
