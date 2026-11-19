@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Liquid ¥→Ks</string>
+    <string name="accessibility_service_description">Screen ပေါ်ရှိ ¥ (Yen/Yuan) ဈေးနှုန်းများကို အလိုအလျောက်ဖတ်ရှုပြီး မြန်မာကျပ် (MMK) သို့ ပြောင်းလဲပေးရန် အသုံးပြုပါသည်။</string>
+</resources>
