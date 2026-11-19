@@ -13,64 +13,7 @@ import android.os.IBinder
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateIntAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.ExperimentalComposeUiApi
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -83,8 +26,6 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import java.text.NumberFormat
-import java.util.Locale
 import kotlin.math.roundToInt
 
 class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
@@ -125,18 +66,12 @@ class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner
     private fun startForegroundNotification() {
         val channelId = "liquid_glass_overlay_channel"
         val manager = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
-            channelId,
-            "Liquid Glass ¥→MMK Overlay",
-            NotificationManager.IMPORTANCE_LOW
+        manager.createNotificationChannel(
+            NotificationChannel(channelId, "Liquid Glass Overlay", NotificationManager.IMPORTANCE_LOW)
         )
-        manager.createNotificationChannel(channel)
 
         val openIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
@@ -159,9 +94,7 @@ class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner
 
         val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-            } else 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) WindowManager.LayoutParams.FLAG_BLUR_BEHIND else 0
 
         layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -173,16 +106,13 @@ class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner
             gravity = Gravity.TOP or Gravity.START
             x = 36
             y = 220
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                blurBehindRadius = 56
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) blurBehindRadius = 56
         }
 
         val composeView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@LiquidGlassOverlayService)
             setViewTreeViewModelStoreOwner(this@LiquidGlassOverlayService)
             setViewTreeSavedStateRegistryOwner(this@LiquidGlassOverlayService)
-
             setContent {
                 LiquidGlassFloatingCard(
                     onDragEvent = ::handleWindowDragEvent,
@@ -239,249 +169,3 @@ class LiquidGlassOverlayService : Service(), LifecycleOwner, ViewModelStoreOwner
 
     override fun onBind(intent: Intent?): IBinder? = null
 }
-
-@OptIn(ExperimentalComposeUiApi::class)
-@Composable
-private fun LiquidGlassFloatingCard(
-    onDragEvent: (MotionEvent) -> Boolean,
-    onFocusableChange: (Boolean) -> Unit,
-    onCloseOverlay: () -> Unit
-) {
-    val state by PriceBus.state.collectAsState()
-    val context = LocalContext.current
-
-    var isCollapsed by remember { mutableStateOf(false) }
-    var isEditingRate by remember { mutableStateOf(false) }
-    var rateDraft by remember(state.currency, state.activeRate) {
-        mutableStateOf(formatDecimal(state.activeRate))
-    }
-
-    LaunchedEffect(isEditingRate) {
-        onFocusableChange(isEditingRate)
-    }
-
-    val animatedMmk by animateIntAsState(
-        targetValue = state.convertedMmk.roundToInt(),
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "mmkTicker"
-    )
-
-    val sweepProgress = remember { Animatable(-0.5f) }
-    val popScale = remember { Animatable(1f) }
-
-    LaunchedEffect(state.detectedAmount, state.activeRate, state.currency) {
-        popScale.snapTo(1.06f)
-        popScale.animateTo(
-            targetValue = 1f,
-            animationSpec = spring(dampingRatio = 0.45f, stiffness = 400f)
-        )
-    }
-
-    LaunchedEffect(state.detectedAmount, state.activeRate, state.currency) {
-        sweepProgress.snapTo(-0.4f)
-        sweepProgress.animateTo(
-            targetValue = 1.5f,
-            animationSpec = tween(durationMillis = 720, easing = FastOutSlowInEasing)
-        )
-    }
-
-    val glassShape = if (isCollapsed) CircleShape else RoundedCornerShape(28.dp)
-
-    val glassBgBrush = Brush.linearGradient(
-        colors = listOf(
-            Color(0x521E293B),
-            Color(0x3D0F172A),
-            Color(0x4A1E293B)
-        )
-    )
-    val glassRimBrush = Brush.linearGradient(
-        colors = listOf(
-            Color(0xCCFFFFFF),
-            Color(0x807DD3FC),
-            Color(0x2EFFFFFF),
-            Color(0x88D8B4FE),
-            Color(0xB3FFFFFF)
-        )
-    )
-
-    Box(
-        modifier = Modifier
-            .widthIn(min = if (isCollapsed) 220.dp else 306.dp, max = 324.dp)
-            .clip(glassShape)
-            .background(glassBgBrush)
-            .drawWithContent {
-                drawContent()
-                val p = sweepProgress.value
-                if (p > -0.35f && p < 1.45f) {
-                    val xCenter = size.width * p
-                    drawRect(
-                        brush = Brush.linearGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.28f),
-                                Color.Transparent
-                            ),
-                            start = Offset(xCenter - 90f, 0f),
-                            end = Offset(xCenter + 90f, size.height)
-                        )
-                    )
-                }
-            }
-            .border(width = 1.25.dp, brush = glassRimBrush, shape = glassShape)
-            .padding(horizontal = 14.dp, vertical = if (isCollapsed) 10.dp else 12.dp)
-    ) {
-        if (isCollapsed) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .pointerInteropFilter { onDragEvent(it) },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(if (state.autoScanEnabled) Color(0xFF34D399) else Color(0xFFFBBF24))
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "¥${formatInt(state.detectedAmount.roundToInt())} → ${formatInt(animatedMmk)} Ks",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                GlassPillButton(text = "▼") { isCollapsed = false }
-            }
-        } else {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .pointerInteropFilter { onDragEvent(it) }
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterHorizontally)
-                            .width(38.dp)
-                            .height(4.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.45f))
-                    )
-                    Spacer(Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (state.autoScanEnabled) Color(0xFF34D399)
-                                        else Color(0xFFFBBF24)
-                                    )
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = if (state.autoScanEnabled) "Auto-Read ON" else "Paused",
-                                color = Color.White.copy(alpha = 0.9f),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            GlassPillButton(
-                                text = if (state.autoScanEnabled) "Auto" else "Off",
-                                active = state.autoScanEnabled
-                            ) { PriceBus.toggleAutoScan() }
-                            GlassPillButton(text = "—") {
-                                isEditingRate = false
-                                isCollapsed = true
-                            }
-                            GlassPillButton(text = "✕") { onCloseOverlay() }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0x45090D16))
-                        .border(0.8.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(14.dp))
-                        .padding(3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    YenCurrency.entries.forEach { curr ->
-                        val selected = state.currency == curr
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(
-                                    if (selected) Color.White.copy(alpha = 0.24f)
-                                    else Color.Transparent
-                                )
-                                .clickable { PriceBus.setCurrency(context, curr) }
-                                .padding(vertical = 6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = curr.label,
-                                color = if (selected) Color.White else Color.White.copy(alpha = 0.65f),
-                                fontSize = 11.sp,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                Text(
-                    text = state.sourceLabel,
-                    color = Color(0xFFBAE6FD),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                if (state.detectedPrices.size > 1) {
-                    Spacer(Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        state.detectedPrices.forEach { price ->
-                            val isSelected = price == state.detectedAmount
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(
-                                        if (isSelected) Color(0x6638BDF8)
-                                        else Color.White.copy(alpha = 0.12f)
-                                    )
-                                    .border(
-                                        0.8.dp,
-                                        if (isSelected) Color(0xFF7DD3FC) else Color.White.copy(alpha = 0.2f),
-             
